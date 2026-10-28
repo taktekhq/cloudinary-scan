@@ -1,0 +1,113 @@
+name: scan
+
+# Finds sites that serve images from Cloudinary, over a slice of the Tranco list, in parallel shards.
+# This repo is public, so each shard's result is encrypted with age before it is uploaded:
+# only the .age file leaves the runner, and the logs show counts only, never domains.
+# Setup and decryption: README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Rows to skip in the list (0 = start at rank 1, 100000 = start at rank 100001)"
+        default: "0"
+      shard_size:
+        description: "Rows per shard"
+        default: "10000"
+      shards:
+        description: "Number of shards (1 to 256, the GitHub matrix limit)"
+        default: "10"
+      measure:
+        description: "Cloudinary images to HEAD per site for byte estimates (0 = off)"
+        default: "20"
+      list_url:
+        description: "Zip or plain CSV of rank,domain lines (default: the latest Tranco top 1M)"
+        default: "https://tranco-list.eu/top-1m.csv.zip"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Refuse to run without an encryption key
+        env:
+          AGE_RECIPIENT: ${{ vars.AGE_RECIPIENT }}
+        run: |
+          case "$AGE_RECIPIENT" in
+            age1*) ;;
+            *) echo "::error::Set the repository variable AGE_RECIPIENT to an age public key (age1...). See README.md."; exit 1 ;;
+          esac
+      - name: Shard list
+        id: matrix
+        env:
+          SHARDS: ${{ inputs.shards }}
+          SIZE: ${{ inputs.shard_size }}
+          START: ${{ inputs.start }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os
+          n, size, start = (int(os.environ[k]) for k in ("SHARDS", "SIZE", "START"))
+          assert 1 <= n <= 256, "shards must be 1 to 256"
+          assert size >= 1 and start >= 0, "bad shard_size or start"
+          print("matrix=" + json.dumps(list(range(n))))
+          PY
+      - name: Download the list once, so every shard scans the same one
+        env:
+          LIST_URL: ${{ inputs.list_url }}
+        run: |
+          curl -sfL --retry 3 -o list.download "$LIST_URL"
+          if unzip -tq list.download >/dev/null 2>&1; then unzip -p list.download > list.csv; else mv list.download list.csv; fi
+          wc -l list.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: list
+          path: list.csv
+          retention-days: 1
+
+  scan:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: list
+      - name: Install age
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq age
+      - name: Scan and encrypt
+        env:
+          AGE_RECIPIENT: ${{ vars.AGE_RECIPIENT }}
+          CLOUDINARY_SCAN_UA: ${{ vars.SCAN_USER_AGENT }}
+          START: ${{ inputs.start }}
+          SIZE: ${{ inputs.shard_size }}
+          SHARD: ${{ matrix.shard }}
+          MEASURE: ${{ inputs.measure }}
+        run: |
+          set -euo pipefail
+          case "$AGE_RECIPIENT" in
+            age1*) ;;
+            *) echo "::error::AGE_RECIPIENT is not set, refusing to write plaintext results"; exit 1 ;;
+          esac
+          python3 cloudinary_scan.py --list list.csv --measure "$MEASURE" \
+            --start $((START + SHARD * SIZE)) --count "$SIZE" \
+            --workers 128 --timeout 12 --out "scan-$SHARD.jsonl"
+          echo "shard $SHARD: $(wc -l < "scan-$SHARD.jsonl") sites use Cloudinary"
+          age -r "$AGE_RECIPIENT" -o "scan-$SHARD.jsonl.age" "scan-$SHARD.jsonl"
+          rm -f "scan-$SHARD.jsonl"
+          ls -l "scan-$SHARD.jsonl.age"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scan-${{ matrix.shard }}
+          path: scan-${{ matrix.shard }}.jsonl.age
+          if-no-files-found: error
+          retention-days: 7

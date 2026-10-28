@@ -1,0 +1,7 @@
+# Results, keys and lists never belong in this repo.
+*.jsonl
+*.age
+*.key
+*.csv
+*.zip
+__pycache__/
