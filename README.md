@@ -41,6 +41,7 @@ Run the tests with `python3 -m unittest`.
 
 - It makes one GET for the home page (a second for the `www.` form if the first fails), and with `--measure` a few HEAD requests for images. It does not crawl further and does not read `robots.txt`.
 - Set your own user agent so site owners can reach you: `--user-agent "MyScan/1.0 (+https://example.com/about-this-scan)"` or the `CLOUDINARY_SCAN_UA` environment variable. The default points to this repo.
+- Some pages (inline base64 blobs, long minified runs) make a naive regex backtrack for minutes, and Python's `re` holds the GIL, so one bad page stalls every worker. Each pattern here only runs when the literal text it needs is on the page, and its repeats are bounded. A test feeds it multi-megabyte runs.
 - Home page HTML only. Images added by JavaScript after load are missed, so counts are a floor.
 
 ## Run it on GitHub Actions
@@ -85,6 +86,7 @@ gh run watch <run-id>
 | `start` | 0 | Rows to skip in the list |
 | `shard_size` | 10000 | Rows per shard |
 | `shards` | 10 | Number of parallel jobs (1 to 256, the GitHub matrix limit) |
+| `only` | empty | Re-run just these shard numbers, e.g. `16,39` (same `start`, `shard_size` and `shards` as the first run) |
 | `measure` | 20 | Images to HEAD per matching site (0 turns it off) |
 | `list_url` | Tranco top 1M | Any zip or plain CSV of `rank,domain` lines |
 
@@ -93,11 +95,11 @@ The list is downloaded once by a first job and shared, so every shard scans the 
 ### Download and decrypt
 
 ```sh
-python3 collect.py <run-id> --repo OWNER/REPO \
+python3 collect.py <run-id> [<run-id> ...] --repo OWNER/REPO \
   --identity ~/.config/cloudinary-scan/age.key --out all.jsonl
 ```
 
-`collect.py` downloads every `scan-*` artifact with `gh`, decrypts each in memory with `age`, and writes one file sorted by rank, one row per domain (mode 600). To decrypt a single shard by hand:
+`collect.py` downloads every `scan-*` artifact with `gh`, decrypts each in memory with `age`, and writes one file sorted by rank, one row per domain (mode 600). Pass several run ids to merge a first run and its re-runs. To decrypt a single shard by hand:
 
 ```sh
 age -d -i ~/.config/cloudinary-scan/age.key scan-0.jsonl.age > scan-0.jsonl

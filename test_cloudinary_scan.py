@@ -1,5 +1,6 @@
 import importlib
 import os
+import time
 import unittest
 from unittest import mock
 
@@ -39,6 +40,29 @@ class ParseTest(unittest.TestCase):
     def test_transformation(self):
         self.assertEqual(transformation("w_400,c_fill/v1/a.jpg"), "w_400,c_fill")
         self.assertEqual(transformation("v1/a.jpg"), "")
+
+
+class SlowPageTest(unittest.TestCase):
+    """`re` holds the GIL, so a page that makes a pattern backtrack freezes every worker thread."""
+
+    def finishes_fast(self, html):
+        t = time.time()
+        parse(html)
+        self.assertLess(time.time() - t, 2)
+
+    def test_long_runs_without_cloudinary(self):
+        self.finishes_fast("x" * 3_000_000)
+        self.finishes_fast("https://" + "a" * 2_000_000 + "/")
+        self.finishes_fast("https://a.com/image/upload/" + "w_" + "a_" * 500_000)
+
+    def test_long_runs_around_cloudinary_text(self):
+        self.finishes_fast("x" * 1_000_000 + "-res.cloudinary.com/image/upload/a.jpg")
+        self.finishes_fast("res.cloudinary.com/-res.cloudinary.com/" + "x" * 2_000_000)
+
+    def test_private_cdn_name_is_the_whole_run_before_the_host(self):
+        found = parse('<img src="https://my-shop-2-res.cloudinary.com/image/upload/w_9/a.jpg">')
+        self.assertEqual(found["private_cdn"], ["my-shop-2"])
+        self.assertIsNone(parse("<img src='https:// -res.cloudinary.com/image/upload/a.jpg'>"))
 
 
 class UserAgentTest(unittest.TestCase):

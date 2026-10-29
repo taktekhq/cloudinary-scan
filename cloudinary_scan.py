@@ -30,12 +30,21 @@ DEFAULT_UA = "Mozilla/5.0 (compatible; cloudinary-scan/1.0; +https://github.com/
 UA = os.environ.get("CLOUDINARY_SCAN_UA") or DEFAULT_UA
 TAIL = r"""([^"'\s<>)\\]*)"""
 RES = re.compile(r"res\.cloudinary\.com/([A-Za-z0-9_-]+)/(image|video|raw)/(upload|fetch|private|authenticated)/" + TAIL)
-PRIVATE = re.compile(r"([A-Za-z0-9_-]+)-res\.cloudinary\.com/(image|video|raw)/(upload|fetch|private|authenticated)/" + TAIL)
+PRIVATE = re.compile(r"-res\.cloudinary\.com/(image|video|raw)/(upload|fetch|private|authenticated)/" + TAIL)
+NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 CNAME = re.compile(
-    r"https?://([A-Za-z0-9.-]+\.[A-Za-z]{2,})/(?:[A-Za-z0-9_-]+/)?(image|video)/(upload|fetch)/"
-    r"((?:[a-z]{1,3}_[A-Za-z0-9.:_-]+[,/])+)" + TAIL
+    r"https?://([A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,})/(?:[A-Za-z0-9_-]{1,100}/)?(image|video)/(upload|fetch)/"
+    r"((?:[a-z]{1,3}_[A-Za-z0-9.:_-]{1,300}[,/]){1,40})" + TAIL
 )
 TRANSFORM = re.compile(r"^((?:[a-z]{1,3}_[A-Za-z0-9.:_-]+[,/])+)")
+
+
+def cloud_before(html, end):
+    """The cloud name just before index `end` (up to 100 name characters), found by walking back."""
+    i = end
+    while i > 0 and end - i < 100 and html[i - 1] in NAME_CHARS:
+        i -= 1
+    return i, html[i:end]
 
 
 def transformation(tail):
@@ -45,23 +54,34 @@ def transformation(tail):
 
 
 def parse(html):
-    """Cloudinary usage found in one page's HTML, or None when there is none."""
+    """Cloudinary usage found in one page's HTML, or None when there is none.
+
+    Each regex only runs when the literal text it needs is on the page. `re` holds the GIL, so a
+    pattern that backtracks over a long run of letters (an inline base64 blob, say) would freeze
+    every worker thread; the substring checks and the bounded repeats above keep that from happening.
+    """
     html = html.replace("\\/", "/").replace("&amp;", "&")
     clouds, urls, transforms, private, cnames = {}, set(), {}, set(), set()
-    for m in RES.finditer(html):
-        cloud, tail = m.group(1), m.group(4)
-        clouds[cloud] = clouds.get(cloud, 0) + 1
-        urls.add(m.group(0))
-        t = transformation(tail)
-        transforms[t] = transforms.get(t, 0) + 1
-    for m in PRIVATE.finditer(html):
-        cloud, tail = m.group(1), m.group(4)
-        clouds[cloud] = clouds.get(cloud, 0) + 1
-        private.add(cloud)
-        urls.add(m.group(0))
-        t = transformation(tail)
-        transforms[t] = transforms.get(t, 0) + 1
-    for m in CNAME.finditer(html):
+    if "res.cloudinary.com/" in html:
+        for m in RES.finditer(html):
+            cloud, tail = m.group(1), m.group(4)
+            clouds[cloud] = clouds.get(cloud, 0) + 1
+            urls.add(m.group(0))
+            t = transformation(tail)
+            transforms[t] = transforms.get(t, 0) + 1
+        if "-res.cloudinary.com/" in html:
+            for m in PRIVATE.finditer(html):
+                begin, cloud = cloud_before(html, m.start())
+                if not cloud:
+                    continue
+                tail = m.group(3)
+                clouds[cloud] = clouds.get(cloud, 0) + 1
+                private.add(cloud)
+                urls.add(html[begin:m.end()])
+                t = transformation(tail)
+                transforms[t] = transforms.get(t, 0) + 1
+    cname_matches = list(CNAME.finditer(html)) if ("/upload/" in html or "/fetch/" in html) else []
+    for m in cname_matches:
         host = m.group(1).lower()
         if host.endswith("cloudinary.com"):
             continue
@@ -76,7 +96,7 @@ def parse(html):
         "clouds": clouds,
         "private_cdn": sorted(private),
         "custom_hosts": sorted(cnames),
-        "refs": sum(clouds.values()) + sum(1 for _ in CNAME.finditer(html)),
+        "refs": sum(clouds.values()) + len(cname_matches),
         "unique_urls": len(urls),
         "transforms": len(transforms),
         "f_auto": "f_auto" in text,

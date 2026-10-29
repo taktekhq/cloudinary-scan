@@ -17,6 +17,9 @@ on:
       shards:
         description: "Number of shards (1 to 256, the GitHub matrix limit)"
         default: "10"
+      only:
+        description: "Re-run just these shard numbers, comma separated (empty = all of 0 to shards-1)"
+        default: ""
       measure:
         description: "Cloudinary images to HEAD per site for byte estimates (0 = off)"
         default: "20"
@@ -48,13 +51,16 @@ jobs:
           SHARDS: ${{ inputs.shards }}
           SIZE: ${{ inputs.shard_size }}
           START: ${{ inputs.start }}
+          ONLY: ${{ inputs.only }}
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'PY'
           import json, os
           n, size, start = (int(os.environ[k]) for k in ("SHARDS", "SIZE", "START"))
           assert 1 <= n <= 256, "shards must be 1 to 256"
           assert size >= 1 and start >= 0, "bad shard_size or start"
-          print("matrix=" + json.dumps(list(range(n))))
+          only = sorted({int(x) for x in os.environ["ONLY"].replace(" ", "").split(",") if x})
+          assert all(0 <= i < n for i in only), "only must list shard numbers below shards"
+          print("matrix=" + json.dumps(only or list(range(n))))
           PY
       - name: Download the list once, so every shard scans the same one
         env:

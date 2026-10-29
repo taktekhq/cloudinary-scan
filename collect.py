@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download a workflow run's encrypted shards, decrypt them and merge them into one file.
 
-    python3 collect.py RUN_ID --repo OWNER/REPO --identity ~/.config/cloudinary-scan/age.key --out all.jsonl
+    python3 collect.py RUN_ID [RUN_ID ...] --repo OWNER/REPO --identity ~/.config/cloudinary-scan/age.key --out all.jsonl
 
 Needs gh (logged in) and age. Shards are decrypted in memory, so no plaintext shard is written
 to disk; only --out is, with mode 600. Rows are sorted by rank, one row per domain.
@@ -36,22 +36,23 @@ def decrypt(path, identity):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run_id", nargs="?", help="workflow run id to download artifacts from")
+    ap.add_argument("run_ids", nargs="*", metavar="RUN_ID", help="workflow run ids to download artifacts from")
     ap.add_argument("--repo", help="OWNER/REPO that ran the workflow (default: the current directory's repo)")
     ap.add_argument("--dir", help="folder holding downloaded .age files (skips the download)")
     ap.add_argument("--identity", required=True, help="age private key file")
     ap.add_argument("--out", required=True, help="merged JSON lines to write")
     a = ap.parse_args()
-    if not a.run_id and not a.dir:
+    if not a.run_ids and not a.dir:
         ap.error("give a run id or --dir")
 
     with tempfile.TemporaryDirectory() as tmp:
         src = a.dir
         if not src:
-            cmd = ["gh", "run", "download", a.run_id, "-D", tmp, "-p", "scan-*"]
-            if a.repo:
-                cmd += ["-R", a.repo]
-            subprocess.run(cmd, check=True)
+            for run_id in a.run_ids:
+                cmd = ["gh", "run", "download", run_id, "-D", os.path.join(tmp, run_id), "-p", "scan-*"]
+                if a.repo:
+                    cmd += ["-R", a.repo]
+                subprocess.run(cmd, check=True)
             src = tmp
         files = sorted(glob.glob(os.path.join(src, "**", "*.age"), recursive=True))
         if not files:
